@@ -5,6 +5,7 @@
 #include "message_center.h"
 #include "can_comm.h"
 #include "rm_referee.h"
+#include "SEGGER_RTT.h"
 //目前版本必须以复位姿态启动！！！目前只写了yaw和大小pitch相关部分，剩下的后面加
 
 /*-----角度读取----- */
@@ -12,12 +13,12 @@
 #define OFFSET_PITCH_SMALL (18.66f)
 #define M2006_TOTALANGLE_JOINTANGLE_RATIO (34.768f) //两个关节的减速比是否一致？
 /*-----力反馈----- */
-
+#define ANGLE_DEADZONE (3.0f)
 
 #define BUFFER_LENGTH (8)
 
 static DJIMotorInstance *yaw_motor,*pitch_motor_big,*pitch_motor_small,*roll_motor_big,*differencial_motor_pitch;
-static Joint_state_e pitch_big_state,pitch_small_state;
+static Joint_state_s pitch_big_state,pitch_small_state;
 static float yaw_angle,pitch_angle_big,pitch_angle_small,roll_angle,end_pitch_angle;
 static float yaw_ecd_offset,pitch_big_ecd_offset,pitch_small_ecd_offset,roll_ecd_offset,end_pitch_ecd_offset;
 static Button_judge_s button_1,button_2,button_3,button_4;
@@ -29,6 +30,8 @@ static Controller_cmd_s controller_cmd;//用于通讯发送
 static Arm_feed_s arm_feedback;//机械臂角度反馈
 static CANCommInstance* controller_can_comm;
 static controller_state_e controller_state;//是否复位，启动力反馈和重力补偿
+static TickType_t last_rx_time;
+static TickType_t interval = 100;
 
 void CustomControllerInit()
 {
@@ -246,65 +249,179 @@ static void ButtonTask()
     }
 }
 
+static void RTT_Data()
+{
+    
+}
 
-//参考值设置移到最后
+static void LinearInterpolation()
+{
+    TickType_t time = xTaskGetTickCount();
+    TickType_t dt = time - last_rx_time;
+    if(dt <= 300)
+    {
+        float dtheta_pitch_small = pitch_small_state.now_angle - pitch_small_state.last_angle;
+        float speed_pitch_small = dtheta_pitch_small / (float)interval;
+        float predict_pitch_small_angle = arm_feedback.pitch_small_angle + speed_pitch_small * (float)dt;
+        pitch_small_state.smooth_diff = controller_cmd.pitch_small_angle - predict_pitch_small_angle;
+
+        float dtheta_pitch_big = pitch_big_state.now_angle - pitch_big_state.last_angle;
+        float speed_pitch_big = dtheta_pitch_big / (float)interval;
+        float predict_pitch_big_angle = arm_feedback.pitch_big_angle + speed_pitch_big * (float)dt;
+        pitch_big_state.smooth_diff = predict_pitch_big_angle - controller_cmd.pitch_big_angle;
+    }
+    else
+    {
+        pitch_small_state.smooth_diff = pitch_small_state.diff;
+        pitch_big_state.smooth_diff = pitch_big_state.diff;
+    }
+}
+
 static void KeepBalance()
 {
+    /*一般重力补偿相关参数*/
     static float coe_small = 0.8f;
-    float A_pitch_small = -2420.15;
-    float C_pitch_small = -426.26;
     static float coe_big = 0.8f;
-    float A_pitch_big = 2543.6;
-    float B_pitch_big = 3429.2;
-    float C_pitch_big = 415.4;
-    float K = -400;
     static float kv_small = 0.0f; // 虚拟阻尼系数，根据发热情况调整
     static float kv_big = 0.0f;
     static float filter_alpha = 0.2f; // 滤波系数，越小越平滑
     
-
     //存储滤波状态的静态变量
     static float last_comp_small = 0;
     static float last_comp_big = 0;
 
+    //原始输出
+    static float raw_comp_small;
+    static float raw_comp_big;
 
-    float raw_comp_small = ((A_pitch_small * cosf((pitch_angle_small - pitch_angle_big) * DEG_TO_RAD)) + C_pitch_small) * coe_small;
-    
-    float cable_tension = K * cosf(pitch_angle_big * DEG_TO_RAD);
-    float raw_comp_big = ((A_pitch_big * cosf(pitch_angle_big * DEG_TO_RAD)) + 
-                          (B_pitch_big * cosf((180.0f - pitch_angle_small + pitch_angle_big) * DEG_TO_RAD)) + 
-                          C_pitch_big + cable_tension) * coe_big;
+    //角度差-电流映射参数
+    static float Kp_small = 200.0f;
+    static float Kp_big = 300.0f;
 
-    //低通滤波
+    float A = 0;
+    float B = 0;
+    float C = 0;
+    switch(pitch_small_state.state)
+    {
+        case JOINT_BALANCE:
+        {
+            A = -2420.15;
+            C = -426.26;
+            raw_comp_small = A * cosf((pitch_angle_small - pitch_angle_big) * DEG_TO_RAD) + C;
+            break;
+        }
+        case JOINT_FORCE_FEEDBACK:
+        {
+
+            //向上补偿摩擦力并加额外力矩
+            if(pitch_small_state.diff < 0)
+            {
+                A = -3002.8;
+                C = -949.5;
+                
+            }
+            //向下补偿
+            else
+            {
+                A = -1837.5;
+                C = 97.0;
+
+            }
+            raw_comp_small = (A * cosf((pitch_angle_small - pitch_angle_big) * DEG_TO_RAD)) + C + pitch_small_state.smooth_diff * Kp_small;
+            break;
+        }
+    }
+    raw_comp_small *= coe_small;
     float filtered_small = filter_alpha * raw_comp_small + (1.0f - filter_alpha) * last_comp_small;
-    float filtered_big = filter_alpha * raw_comp_big + (1.0f - filter_alpha) * last_comp_big;
-    
     last_comp_small = filtered_small;
-    last_comp_big = filtered_big;
-
-    //虚拟阻尼
     float damping_small = pitch_motor_small->measure.speed_aps * kv_small;
-    float damping_big = pitch_motor_big->measure.speed_aps * kv_big;
-
-
     DJIMotorSetRef(pitch_motor_small, filtered_small - damping_small);
+
+    float K = -400;
+    switch(pitch_big_state.state)
+    {
+        case JOINT_BALANCE:
+        {
+            A = 2543.6;
+            B = 3429.2;
+            C = 415.4;
+            raw_comp_big = (A * cosf(pitch_angle_big * DEG_TO_RAD)) + 
+                            (B * cosf((180.0f - pitch_angle_small + pitch_angle_big) * DEG_TO_RAD)) + 
+                            C;
+            break;
+        }
+        case JOINT_FORCE_FEEDBACK:
+        {
+            if(pitch_big_state.diff > 0)
+            {
+                A = 1753.2;
+                B = 2997.3;
+                C = 1264.9;
+            }
+            else
+            {
+                A = 3334.0;
+                B = 3861.1;
+                C = -434.1;
+            }
+            raw_comp_big = (A * cosf(pitch_angle_big * DEG_TO_RAD)) + 
+                            (B * cosf((180.0f - pitch_angle_small + pitch_angle_big) * DEG_TO_RAD)) + 
+                            C + Kp_big * pitch_big_state.smooth_diff;
+            break;
+        }
+    }
+    float cable_tension = K * cosf(pitch_angle_big * DEG_TO_RAD);
+    raw_comp_big = (raw_comp_big + cable_tension) * coe_big;
+    float filtered_big = filter_alpha * raw_comp_big + (1.0f - filter_alpha) * last_comp_big;
+    last_comp_big = filtered_big;
+    float damping_big = pitch_motor_big->measure.speed_aps * kv_big;
     DJIMotorSetRef(pitch_motor_big, filtered_big - damping_big);
 }
 
-
 static void ForceFeedback()
 {
-    SubGetMessage(arm_sub,(void*)&arm_feedback);
+    if(SubGetMessage(arm_sub,(void*)&arm_feedback))
+    {
+        TickType_t now = xTaskGetTickCount();
+        if(now - last_rx_time > 0)
+        {
+            interval = now - last_rx_time;
+        }
+        pitch_small_state.last_angle = pitch_small_state.now_angle;
+        pitch_big_state.last_angle = pitch_big_state.now_angle;
+        pitch_small_state.now_angle = arm_feedback.pitch_small_angle;
+        pitch_big_state.now_angle = arm_feedback.pitch_big_angle;
+        last_rx_time = now;
+    }
 
+    /*角度差以与电流补偿方向一致为正*/
+    pitch_small_state.diff = controller_cmd.pitch_small_angle - arm_feedback.pitch_small_angle;
+    pitch_big_state.diff = arm_feedback.pitch_big_angle - controller_cmd.pitch_big_angle;
+
+    if(fabs(pitch_big_state.diff) >= ANGLE_DEADZONE)
+    {
+        pitch_big_state.state = JOINT_FORCE_FEEDBACK;
+    }
+    else
+    {
+        pitch_big_state.state = JOINT_BALANCE;
+    }
+    if(fabs(pitch_small_state.diff) >= ANGLE_DEADZONE)
+    {
+        pitch_small_state.state = JOINT_FORCE_FEEDBACK;
+    }
+    else
+    {
+        pitch_small_state.state = JOINT_BALANCE;
+    }
+    LinearInterpolation();
 }
 
-
+/*加一些安全检查，给反馈加点插值平滑*/
 void CustomControllerTask()
 {
     ButtonTask();
     MotorAngleLimit();
-
-
 
     if(controller_state == CONTROLLER_READY)
     {
@@ -324,7 +441,6 @@ void CustomControllerTask()
             ForceFeedBack();
         }
     }
-
 }
 
 
