@@ -62,6 +62,7 @@ typedef struct
 	uint16_t CmdID;
     Controller_cmd_s CustomRobot;
     ext_remote_control_t RemoteControl;
+	Arm_feed_s ForceFeedBack;
 } referee_vt_info_t;
 
 // 模式是否切换标志位，0为未切换，1为切换，static定义默认为0
@@ -115,7 +116,7 @@ referee_info_t *RefereeInit(UART_HandleTypeDef *referee_usart_handle);
  * @param tx_len 发送长度
  */
 void RefereeSend(uint8_t *send, uint16_t tx_len);
-
+Arm_feed_s ForceFeedBack();
 referee_vt_info_t *RefereeVtInit(UART_HandleTypeDef *referee_vt_usart_handle);
 
 #endif // !REFEREE_H

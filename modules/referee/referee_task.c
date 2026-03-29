@@ -21,7 +21,7 @@ static Referee_Interactive_info_t *Interactive_data; // UI绘制需要的机器�
 static referee_info_t *referee_recv_info;            // 接收到的裁判系统数据
 uint8_t UI_Seq;                                      // 包序号，供整个referee文件使用
 static Subscriber_t* controller_sub;
-
+static Publisher_t* arm_pub;
 
 // @todo 不应该使用全局变量
 
@@ -68,6 +68,7 @@ void MyUIInit()
 {
     /*自定义控制器图传通信*/
     controller_sub = SubRegister("controller_cmd",sizeof(Controller_cmd_s));
+    arm_pub = PubRegister("arm_feedback",sizeof(Arm_feed_s));
 }
 
 // 测试用函数，实现模式自动变化,用于检查该任务和裁判系统是否连接正常
@@ -130,7 +131,10 @@ static void RobotModeTest(Referee_Interactive_info_t *_Interactive_data) // 测�
 static void MyUIRefresh(referee_info_t *referee_recv_info, Referee_Interactive_info_t *_Interactive_data)
 {
     Controller_cmd_s controller_data;
+    Arm_feed_s feedback_data;
     if(SubGetMessage(controller_sub,(void*)&controller_data)){
         CostomControllerRefresh(&referee_recv_info->referee_id,controller_data);
     }
+    feedback_data = ForceFeedBack();
+    PubPushMessage(arm_pub,(void*)&feedback_data);
 }

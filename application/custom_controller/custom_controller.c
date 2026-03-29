@@ -7,27 +7,28 @@
 #include "rm_referee.h"
 //目前版本必须以复位姿态启动！！！目前只写了yaw和大小pitch相关部分，剩下的后面加
 
-#define M_ARM_BIG (0.0f)
-#define M_M2006 (0.0f)
-#define M_ARM_SMALL (0.0f)  //暂时认为小臂与末端线密度一致
-#define L_ARM_BIG (0.0f)
-#define L_ARM_SMALL (0.0f)
+/*-----角度读取----- */
 #define OFFSET_PITCH_BIG (3.0f)
 #define OFFSET_PITCH_SMALL (18.66f)
 #define M2006_TOTALANGLE_JOINTANGLE_RATIO (34.768f) //两个关节的减速比是否一致？
+/*-----力反馈----- */
+
 
 #define BUFFER_LENGTH (8)
 
 static DJIMotorInstance *yaw_motor,*pitch_motor_big,*pitch_motor_small,*roll_motor_big,*differencial_motor_pitch;
+static Joint_state_e pitch_big_state,pitch_small_state;
 static float yaw_angle,pitch_angle_big,pitch_angle_small,roll_angle,end_pitch_angle;
 static float yaw_ecd_offset,pitch_big_ecd_offset,pitch_small_ecd_offset,roll_ecd_offset,end_pitch_ecd_offset;
 static Button_judge_s button_1,button_2,button_3,button_4;
 static Publisher_t *controller_pub;
+static Subscriber_t *arm_sub;
 static uint8_t controller_idx;
 static Controller_cmd_s controller_cmd_buff[BUFFER_LENGTH];
 static Controller_cmd_s controller_cmd;//用于通讯发送
+static Arm_feed_s arm_feedback;//机械臂角度反馈
 static CANCommInstance* controller_can_comm;
-static controller_state_e controller_state;
+static controller_state_e controller_state;//是否复位，启动力反馈和重力补偿
 
 void CustomControllerInit()
 {
@@ -100,7 +101,7 @@ void CustomControllerInit()
             .rx_id = 0x314,
         },
         .send_data_len = sizeof(Controller_cmd_s),
-        .recv_data_len = 0,//需要反馈什么？后续加入
+        .recv_data_len = sizeof(Arm_feed_s),//需要反馈什么？后续加入
     };
 
     
@@ -108,7 +109,7 @@ void CustomControllerInit()
     RefereeVtInit(&huart1);
     controller_can_comm = CANCommInit(&controller_can_cfg);
     controller_pub = PubRegister("controller_cmd",sizeof(Controller_cmd_s));
-
+    arm_sub = SubRegister("arm_feedback",sizeof(Arm_feed_s)); 
 }
 
 static void CalculateJointAngle(){
@@ -131,7 +132,6 @@ static void CalculateJointAngle(){
     controller_idx++;
 
 }
-
 static void CalculateCMD(){
     Controller_cmd_s buff = {0};
     for(int i = 0;i < BUFFER_LENGTH;i++)
@@ -148,7 +148,6 @@ static void CalculateCMD(){
     controller_cmd.roll_angle = buff.roll_angle / (float)(BUFFER_LENGTH);
     controller_cmd.diff_pitch = buff.diff_pitch / (float)(BUFFER_LENGTH);
 }
-
 static void MotorAngleInit(){
     yaw_motor->measure.total_round = 0;
     yaw_ecd_offset = yaw_motor->measure.angle_single_round; 
@@ -165,7 +164,6 @@ static void MotorAngleInit(){
     differencial_motor_pitch->measure.total_round = 0;
     end_pitch_ecd_offset = differencial_motor_pitch->measure.angle_single_round;
 }
-
 static void MotorAngleLimit(){
     /*若总角度小于标记零点，则记录新零点*/
     if(pitch_motor_big->measure.total_angle < pitch_big_ecd_offset)
@@ -179,7 +177,6 @@ static void MotorAngleLimit(){
         pitch_small_ecd_offset = pitch_motor_small->measure.angle_single_round;
     }
 }
-/*位号C5,C6为输入口,松开上拉，按下接地*/
 static void ButtonCheck(Button_judge_s* button,uint8_t current_status)
 {
     if(current_status == 0){
@@ -202,7 +199,6 @@ static void ButtonCheck(Button_judge_s* button,uint8_t current_status)
     }
     button->last_status = current_status;
 }
-
 static void ButtonRealTimeCheck(Button_judge_s* button,uint8_t current_status)
 {
     if(current_status == 0)
@@ -214,9 +210,28 @@ static void ButtonRealTimeCheck(Button_judge_s* button,uint8_t current_status)
         button->button_state = BUTTON_RELEASE;
     }
 }
-
-static void DiffRollControll()
+static void ButtonTask()
 {
+    ButtonCheck(&button_1,HAL_GPIO_ReadPin(BUTTON_1_GPIO_Port,BUTTON_1_Pin));
+    ButtonCheck(&button_2,HAL_GPIO_ReadPin(BUTTON_2_GPIO_Port,BUTTON_2_Pin));
+    ButtonRealTimeCheck(&button_3,HAL_GPIO_ReadPin(BUTTON_3_GPIO_Port,BUTTON_3_Pin));
+    ButtonRealTimeCheck(&button_4,HAL_GPIO_ReadPin(BUTTON_4_GPIO_Port,BUTTON_4_Pin));
+    /*----------短按控制夹爪开合------------*/
+    if(button_1.button_state == BUTTON_PRESS){
+        if(controller_cmd.gripper_state == GRIPPER_CLOSE){
+            controller_cmd.gripper_state = GRIPPER_OPEN;
+        }
+        else{
+            controller_cmd.gripper_state = GRIPPER_CLOSE;
+        }
+    }
+    /*----------长按角度复位-------------*/
+    if(button_2.button_state == BUTTON_LONG_PRESS)
+    {
+        MotorAngleInit();
+        controller_state = CONTROLLER_READY;
+    }
+    /*----------左右按键控制小roll逆顺时针旋转--------------*/
     if(button_3.button_state == BUTTON_PRESS && button_4.button_state == BUTTON_RELEASE)
     {
         controller_cmd.diff_roll_state = ROLL_CCW;
@@ -230,6 +245,9 @@ static void DiffRollControll()
         controller_cmd.diff_roll_state = ROLL_STAY;
     }
 }
+
+
+//参考值设置移到最后
 static void KeepBalance()
 {
     static float coe_small = 0.8f;
@@ -273,50 +291,38 @@ static void KeepBalance()
     DJIMotorSetRef(pitch_motor_big, filtered_big - damping_big);
 }
 
-static int16_t pitch_big_current;
 
-void SetCurrent(){
-    DJIMotorSetRef(pitch_motor_big,pitch_big_current);
+static void ForceFeedback()
+{
+    SubGetMessage(arm_sub,(void*)&arm_feedback);
 
 }
 
+
 void CustomControllerTask()
 {
-    ButtonCheck(&button_1,HAL_GPIO_ReadPin(BUTTON_1_GPIO_Port,BUTTON_1_Pin));
-    ButtonCheck(&button_2,HAL_GPIO_ReadPin(BUTTON_2_GPIO_Port,BUTTON_2_Pin));
-    ButtonRealTimeCheck(&button_3,HAL_GPIO_ReadPin(BUTTON_3_GPIO_Port,BUTTON_3_Pin));
-    ButtonRealTimeCheck(&button_4,HAL_GPIO_ReadPin(BUTTON_4_GPIO_Port,BUTTON_4_Pin));
-    if(button_1.button_state == BUTTON_PRESS){
-        if(controller_cmd.gripper_state == GRIPPER_CLOSE){
-            controller_cmd.gripper_state = GRIPPER_OPEN;
-        }
-        else{
-            controller_cmd.gripper_state = GRIPPER_CLOSE;
-        }
-    }
-    if(button_2.button_state == BUTTON_LONG_PRESS)
-    {
-        MotorAngleInit();
-        controller_state = CONTROLLER_READY;
-    }
-    DiffRollControll();
+    ButtonTask();
     MotorAngleLimit();
 
-    /*发送数据平滑处理，可以通过BUFFER_LENGTH控制发送频率？*/
-    CalculateJointAngle();
-    if(controller_idx >= BUFFER_LENGTH)
-    {
-        CalculateCMD();
-        CANCommSend(controller_can_comm,(uint8_t*)&controller_cmd);
-        PubPushMessage(controller_pub,(void*)&controller_cmd);//给图传链路的
-        memset(controller_cmd_buff,0,sizeof(controller_cmd_buff));
-        controller_idx = 0;
-    }
+
 
     if(controller_state == CONTROLLER_READY)
     {
-        //SetCurrent();
+        /*发送数据平滑处理，可以通过BUFFER_LENGTH控制发送频率？*/
+        CalculateJointAngle();
+        if(controller_idx >= BUFFER_LENGTH)
+        {
+            CalculateCMD();
+            //CANCommSend(controller_can_comm,(uint8_t*)&controller_cmd);
+            PubPushMessage(controller_pub,(void*)&controller_cmd);//给图传链路的
+            memset(controller_cmd_buff,0,sizeof(controller_cmd_buff));
+            controller_idx = 0;
+        }
         KeepBalance();
+        if(arm_feedback.feedback_state == FEEDBACK_ON)
+        {
+            ForceFeedBack();
+        }
     }
 
 }
@@ -332,39 +338,39 @@ void CustomControllerTask()
 
 
 /*自动复位，暂时弃用*/
-static void PitchMotorSmallInit(){
-    static uint8_t setflag = 0;
-    DJIMotorStop(pitch_motor_big);
-    if(pitch_motor_small->motor_state == MOTOR_INIT && setflag == 0)
-    {
-        setflag = 1;
-        DJIMotorSetRef(pitch_motor_small,1000);
-    }
-    if(abs(pitch_motor_small->measure.real_current) >= 6000 && pitch_motor_small->motor_state == MOTOR_INIT)
-    {
-        pitch_motor_small->motor_state = MOTOR_READY;
-        pitch_motor_small->measure.last_ecd = pitch_motor_small->measure.ecd;
-        // pitch_motor_small->measure.total_angle = 0;
-        // pitch_motor_small->measure.total_round = 0;
-        DJIMotorSetRef(pitch_motor_small,0);
-        DJIMotorEnable(pitch_motor_big);
-    }
-}
+// static void PitchMotorSmallInit(){
+//     static uint8_t setflag = 0;
+//     DJIMotorStop(pitch_motor_big);
+//     if(pitch_motor_small->motor_state == MOTOR_INIT && setflag == 0)
+//     {
+//         setflag = 1;
+//         DJIMotorSetRef(pitch_motor_small,1000);
+//     }
+//     if(abs(pitch_motor_small->measure.real_current) >= 6000 && pitch_motor_small->motor_state == MOTOR_INIT)
+//     {
+//         pitch_motor_small->motor_state = MOTOR_READY;
+//         pitch_motor_small->measure.last_ecd = pitch_motor_small->measure.ecd;
+//         // pitch_motor_small->measure.total_angle = 0;
+//         // pitch_motor_small->measure.total_round = 0;
+//         DJIMotorSetRef(pitch_motor_small,0);
+//         DJIMotorEnable(pitch_motor_big);
+//     }
+// }
 
-static void PitchMotorBigInit(){
-    static uint8_t setflag = 0;
-    if(pitch_motor_big->motor_state == MOTOR_INIT && setflag == 0)
-    {
-        setflag = 1;
-        DJIMotorSetRef(pitch_motor_big,-1000);
-    }
-    if(abs(pitch_motor_big->measure.real_current) >= 6000 && pitch_motor_big->motor_state == MOTOR_INIT)
-    {
-        pitch_motor_big->motor_state = MOTOR_READY;
-        pitch_motor_big->measure.last_ecd = pitch_motor_big->measure.ecd;
-        // pitch_motor_small->measure.total_angle = 0;
-        // pitch_motor_small->measure.total_round = 0;
-        DJIMotorSetRef(pitch_motor_big,0);
-    }
-}
+// static void PitchMotorBigInit(){
+//     static uint8_t setflag = 0;
+//     if(pitch_motor_big->motor_state == MOTOR_INIT && setflag == 0)
+//     {
+//         setflag = 1;
+//         DJIMotorSetRef(pitch_motor_big,-1000);
+//     }
+//     if(abs(pitch_motor_big->measure.real_current) >= 6000 && pitch_motor_big->motor_state == MOTOR_INIT)
+//     {
+//         pitch_motor_big->motor_state = MOTOR_READY;
+//         pitch_motor_big->measure.last_ecd = pitch_motor_big->measure.ecd;
+//         // pitch_motor_small->measure.total_angle = 0;
+//         // pitch_motor_small->measure.total_round = 0;
+//         DJIMotorSetRef(pitch_motor_big,0);
+//     }
+// }
 

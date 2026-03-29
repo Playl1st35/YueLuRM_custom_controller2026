@@ -49,7 +49,7 @@ void RobotInit()
 void RobotTask()
 {
 #if defined(ONE_BOARD) || defined(GIMBAL_BOARD)
-    RobotCMDTask();
+    //RobotCMDTask();
     CustomControllerTask();
     // GimbalTask();
     // ShootTask();

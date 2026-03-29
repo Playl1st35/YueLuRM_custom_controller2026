@@ -191,6 +191,9 @@ static void JudgeVtData(uint8_t *vt_buff)//都static了就不考虑复用性了�
 				case ID_remote_control: // 0x0304
 					memcpy(&referee_vt_info.RemoteControl,(vt_buff + DATA_Offset), LEN_remote_control_t);
 					break;
+				case ID_custom_controller_feedback:
+					memcpy(&referee_vt_info.ForceFeedBack,(vt_buff + DATA_Offset), LEN_custom_controller_feedback_data_t);
+					break;
 				// }
 			}
 		}
@@ -228,4 +231,9 @@ referee_vt_info_t *RefereeVtInit(UART_HandleTypeDef *referee_vt_usart_handle)
   };
   referee_vt_daemon = DaemonRegister(&daemon_conf);
     return &referee_vt_info;
+}
+
+Arm_feed_s ForceFeedBack()
+{
+	return referee_vt_info.ForceFeedBack;
 }

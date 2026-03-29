@@ -85,7 +85,8 @@ typedef enum
 	ID_shoot_data = 0x0207,				   // 实时射击数据
 	ID_student_interactive = 0x0301,	   // 机器人间交互数据
 	ID_self_ctrl = 0x0302,				   //自定义控制器数据
-	ID_remote_control = 0X0304             // 图传链路键鼠数据
+	ID_remote_control = 0X0304,             // 图传链路键鼠数据
+	ID_custom_controller_feedback = 0x0309
 } CmdID_e;
 
 /* 命令码数据段长,根据官方协议来定义长度，还有自定义数据长度 */
@@ -105,7 +106,8 @@ typedef enum
 	LEN_shoot_data = 7,							 // 0x0207
 	LEN_receive_data = 6 + Communicate_Data_LEN, // 0x0301
 	LEN_self_ctrl_data_t = 30,					 // 0x0302
-	LEN_remote_control_t = 12					 // 0x0304
+	LEN_remote_control_t = 12,					 // 0x0304
+	LEN_custom_controller_feedback_data_t = 30   // 0x0309
 
 } JudgeDataLength_e;
 

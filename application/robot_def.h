@@ -257,6 +257,28 @@ typedef struct
     button_state_e button_state;
 }Button_judge_s;
 
+typedef enum
+{
+    JOINT_BALANCE = 0,
+    JOINT_FORCE_FEEDBACK    
+}Joint_state_e;
+
+typedef enum
+{
+    FEEDBACK_OFF = 0,
+    FEEDBACK_ON
+}Feedback_state_e;
+
+typedef struct 
+{
+    float pitch_small_angle;  //float占四个字节
+    float pitch_big_angle;
+    float yaw_angle;
+    float roll_angle;
+	float diff_pitch;
+    Feedback_state_e feedback_state;
+    uint8_t reserved[9];
+}Arm_feed_s;
 
 #pragma pack() // 开启字节对齐,结束前面的#pragma pack(1)
 
