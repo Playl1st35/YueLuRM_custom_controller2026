@@ -15,7 +15,7 @@
 #include "ins_task.h"
 #include "master_process.h"
 #include "stdint.h"
-
+#include "controller.h"
 /* 开发板类型定义,烧录时注意不要弄错对应功能;修改定义后需要重新编译,只能存在一个定义! */
 #define ONE_BOARD // 单板控制整车
 // #define CHASSIS_BOARD //底盘板
@@ -263,6 +263,16 @@ typedef enum
     JOINT_FORCE_FEEDBACK    
 }Joint_state_e;
 
+typedef struct 
+{
+    Joint_state_e state;
+    float diff;
+    float last_angle;
+    float now_angle;
+    float smooth_diff;
+}Joint_state_s;
+
+
 typedef enum
 {
     FEEDBACK_OFF = 0,
@@ -279,6 +289,12 @@ typedef struct
     Feedback_state_e feedback_state;
     uint8_t reserved[9];
 }Arm_feed_s;
+
+typedef struct 
+{
+    PIDInstance outer_loop;
+    PIDInstance inner_loop;
+}Joint_pid_s;
 
 #pragma pack() // 开启字节对齐,结束前面的#pragma pack(1)
 

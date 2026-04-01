@@ -233,7 +233,7 @@ referee_vt_info_t *RefereeVtInit(UART_HandleTypeDef *referee_vt_usart_handle)
     return &referee_vt_info;
 }
 
-Arm_feed_s ForceFeedBack()
+Arm_feed_s ReturnFeedBackInfo()
 {
 	return referee_vt_info.ForceFeedBack;
 }

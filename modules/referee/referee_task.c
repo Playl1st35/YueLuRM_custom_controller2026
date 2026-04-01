@@ -135,6 +135,6 @@ static void MyUIRefresh(referee_info_t *referee_recv_info, Referee_Interactive_i
     if(SubGetMessage(controller_sub,(void*)&controller_data)){
         CostomControllerRefresh(&referee_recv_info->referee_id,controller_data);
     }
-    feedback_data = ForceFeedBack();
+    feedback_data = ReturnFeedBackInfo();
     PubPushMessage(arm_pub,(void*)&feedback_data);
 }

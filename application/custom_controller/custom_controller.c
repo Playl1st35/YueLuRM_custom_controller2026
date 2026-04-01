@@ -6,6 +6,8 @@
 #include "can_comm.h"
 #include "rm_referee.h"
 #include "SEGGER_RTT.h"
+#include "FreeRTOS.h"
+#include "task.h"
 //目前版本必须以复位姿态启动！！！目前只写了yaw和大小pitch相关部分，剩下的后面加
 
 /*-----角度读取----- */
@@ -13,7 +15,7 @@
 #define OFFSET_PITCH_SMALL (18.66f)
 #define M2006_TOTALANGLE_JOINTANGLE_RATIO (34.768f) //两个关节的减速比是否一致？
 /*-----力反馈----- */
-#define ANGLE_DEADZONE (3.0f)
+#define ANGLE_DEADZONE (5.0f)
 
 #define BUFFER_LENGTH (8)
 
@@ -32,6 +34,8 @@ static CANCommInstance* controller_can_comm;
 static controller_state_e controller_state;//是否复位，启动力反馈和重力补偿
 static TickType_t last_rx_time;
 static TickType_t interval = 100;
+static Joint_pid_s* pitch_small_pid;
+static Joint_pid_s* pitch_big_pid;
 
 void CustomControllerInit()
 {
@@ -74,7 +78,7 @@ void CustomControllerInit()
             .current_PID = {
                 .Kp = 1,
                 .Ki = 0,
-                .Kd = 0,
+                .Kd = 0.0,
                 .MaxOut = 8000,
             }
         },
@@ -96,11 +100,39 @@ void CustomControllerInit()
     _2006_config.can_init_config.tx_id = 4;
     differencial_motor_pitch = DJIMotorInit(&_2006_config);
 
+    PID_Init_Config_s small_inner_pid_cfg = {
+        .Kp = 0,
+        .Ki = 0,
+        .Kd = 0,
+
+    };
+    PID_Init_Config_s small_outer_pid_cfg = {
+        .Kp = 0,
+        .Ki = 0,
+        .Kd = 0,
+
+    };
+    PID_Init_Config_s big_inner_pid_cfg = {
+        .Kp = 0,
+        .Ki = 0,
+        .Kd = 0,
+
+    };
+    PID_Init_Config_s big_outer_pid_cfg = {
+        .Kp = 0,
+        .Ki = 0,
+        .Kd = 0,
+
+    };
+    PIDInit(&pitch_small_pid->inner_loop,&small_inner_pid_cfg);
+    PIDInit(&pitch_small_pid->outer_loop,&small_outer_pid_cfg);
+    PIDInit(&pitch_big_pid->inner_loop,&big_inner_pid_cfg);
+    PIDInit(&pitch_big_pid->outer_loop,&big_outer_pid_cfg);
     CANComm_Init_Config_s controller_can_cfg = 
     {
         .can_config = {
             .can_handle = &hcan1,
-            .tx_id = 0x313,//随便写的
+            .tx_id = 0x313,
             .rx_id = 0x314,
         },
         .send_data_len = sizeof(Controller_cmd_s),
@@ -249,9 +281,12 @@ static void ButtonTask()
     }
 }
 
-static void RTT_Data()
+
+float JointPIDCal(Joint_pid_s* pid,float diff,float speed)
 {
-    
+    float ref = diff;
+    ref = PIDCalculate(&(pid->outer_loop),diff,0);
+    ref = PIDCalculate(&(pid->inner_loop),speed,ref);
 }
 
 static void LinearInterpolation()
@@ -276,7 +311,7 @@ static void LinearInterpolation()
         pitch_big_state.smooth_diff = pitch_big_state.diff;
     }
 }
-
+//开启线性差值时，修改计算式中diff为smooth_diff
 static void KeepBalance()
 {
     /*一般重力补偿相关参数*/
@@ -295,8 +330,8 @@ static void KeepBalance()
     static float raw_comp_big;
 
     //角度差-电流映射参数
-    static float Kp_small = 200.0f;
-    static float Kp_big = 300.0f;
+    static float Kp_small = 30.0f;
+    static float Kp_big = 30.0f;
 
     float A = 0;
     float B = 0;
@@ -327,7 +362,8 @@ static void KeepBalance()
                 C = 97.0;
 
             }
-            raw_comp_small = (A * cosf((pitch_angle_small - pitch_angle_big) * DEG_TO_RAD)) + C + pitch_small_state.smooth_diff * Kp_small;
+            float external_force = JointPIDCal(pitch_small_pid,pitch_small_state.diff,pitch_motor_small->measure.speed_aps);
+            raw_comp_small = (A * cosf((pitch_angle_small - pitch_angle_big) * DEG_TO_RAD)) + C + external_force;
             break;
         }
     }
@@ -364,9 +400,10 @@ static void KeepBalance()
                 B = 3861.1;
                 C = -434.1;
             }
+            float external_force = JointPIDCal(pitch_big_pid,pitch_big_state.diff,pitch_motor_big->measure.speed_aps);
             raw_comp_big = (A * cosf(pitch_angle_big * DEG_TO_RAD)) + 
                             (B * cosf((180.0f - pitch_angle_small + pitch_angle_big) * DEG_TO_RAD)) + 
-                            C + Kp_big * pitch_big_state.smooth_diff;
+                            C + external_force;
             break;
         }
     }
@@ -378,22 +415,31 @@ static void KeepBalance()
     DJIMotorSetRef(pitch_motor_big, filtered_big - damping_big);
 }
 
-static void ForceFeedback()
+static void GetFeedBackInfo()
 {
-    if(SubGetMessage(arm_sub,(void*)&arm_feedback))
-    {
-        TickType_t now = xTaskGetTickCount();
-        if(now - last_rx_time > 0)
-        {
-            interval = now - last_rx_time;
-        }
-        pitch_small_state.last_angle = pitch_small_state.now_angle;
-        pitch_big_state.last_angle = pitch_big_state.now_angle;
-        pitch_small_state.now_angle = arm_feedback.pitch_small_angle;
-        pitch_big_state.now_angle = arm_feedback.pitch_big_angle;
-        last_rx_time = now;
-    }
+    // if(SubGetMessage(arm_sub,(void*)&arm_feedback))
+    // {
+    //     TickType_t now = xTaskGetTickCount();
+    //     if(now - last_rx_time > 0)
+    //     {
+    //         interval = now - last_rx_time;
+    //     }
+    //     pitch_small_state.last_angle = pitch_small_state.now_angle;
+    //     pitch_big_state.last_angle = pitch_big_state.now_angle;
+    //     pitch_small_state.now_angle = arm_feedback.pitch_small_angle;
+    //     pitch_big_state.now_angle = arm_feedback.pitch_big_angle;
+    //     last_rx_time = now;
+    // }
 
+    Arm_feed_s* buff = (Arm_feed_s*)CANCommGet(controller_can_comm);
+    if(buff == NULL){
+        return;
+    }
+    arm_feedback = *buff;
+}
+
+static void ForceFeedBack()
+{
     /*角度差以与电流补偿方向一致为正*/
     pitch_small_state.diff = controller_cmd.pitch_small_angle - arm_feedback.pitch_small_angle;
     pitch_big_state.diff = arm_feedback.pitch_big_angle - controller_cmd.pitch_big_angle;
@@ -414,7 +460,7 @@ static void ForceFeedback()
     {
         pitch_small_state.state = JOINT_BALANCE;
     }
-    LinearInterpolation();
+    //LinearInterpolation();
 }
 
 /*加一些安全检查，给反馈加点插值平滑*/
@@ -430,11 +476,12 @@ void CustomControllerTask()
         if(controller_idx >= BUFFER_LENGTH)
         {
             CalculateCMD();
-            //CANCommSend(controller_can_comm,(uint8_t*)&controller_cmd);
-            PubPushMessage(controller_pub,(void*)&controller_cmd);//给图传链路的
+            CANCommSend(controller_can_comm,(uint8_t*)&controller_cmd);
+            //PubPushMessage(controller_pub,(void*)&controller_cmd);//给图传链路的
             memset(controller_cmd_buff,0,sizeof(controller_cmd_buff));
             controller_idx = 0;
         }
+        GetFeedBackInfo();
         KeepBalance();
         if(arm_feedback.feedback_state == FEEDBACK_ON)
         {
