@@ -287,6 +287,7 @@ float JointPIDCal(Joint_pid_s* pid,float diff,float speed)
     float ref = diff;
     ref = PIDCalculate(&(pid->outer_loop),diff,0);
     ref = PIDCalculate(&(pid->inner_loop),speed,ref);
+    return ref;
 }
 
 static void LinearInterpolation()
