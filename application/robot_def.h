@@ -287,7 +287,11 @@ typedef struct
     float roll_angle;
 	float diff_pitch;
     Feedback_state_e feedback_state;
-    uint8_t reserved[9];
+    uint8_t feedback_flag_pitch_big;
+    uint8_t feedback_flag_pitch_small;
+    uint8_t feedback_flag_yaw;
+    uint8_t feedback_flag_roll;
+    uint8_t reserved[5];
 }Arm_feed_s;
 
 typedef struct 

@@ -101,28 +101,36 @@ void CustomControllerInit()
     differencial_motor_pitch = DJIMotorInit(&_2006_config);
 
     PID_Init_Config_s small_inner_pid_cfg = {
-        .Kp = 0,
-        .Ki = 0,
+        .Kp = 8,
+        .Ki = 10,
         .Kd = 0,
 
+        .Improve = PID_Integral_Limit,
+        .IntegralLimit = 3000,
+        .MaxOut = 9000,
     };
     PID_Init_Config_s small_outer_pid_cfg = {
-        .Kp = 0,
+        .Kp = 50,
         .Ki = 0,
-        .Kd = 0,
+        .Kd = 2,
 
+        .MaxOut = 4500,
     };
     PID_Init_Config_s big_inner_pid_cfg = {
-        .Kp = 0,
-        .Ki = 0,
+        .Kp = 8,
+        .Ki = 10,
         .Kd = 0,
 
+        .Improve = PID_Integral_Limit,
+        .IntegralLimit = 3000,
+        .MaxOut = 9000,
     };
     PID_Init_Config_s big_outer_pid_cfg = {
-        .Kp = 0,
+        .Kp = 50,
         .Ki = 0,
-        .Kd = 0,
+        .Kd = 2,
 
+        .MaxOut = 4500,
     };
     PIDInit(&pitch_small_pid->inner_loop,&small_inner_pid_cfg);
     PIDInit(&pitch_small_pid->outer_loop,&small_outer_pid_cfg);
@@ -349,21 +357,28 @@ static void KeepBalance()
         case JOINT_FORCE_FEEDBACK:
         {
 
-            //向上补偿摩擦力并加额外力矩
-            if(pitch_small_state.diff < 0)
-            {
-                A = -3002.8;
-                C = -949.5;
+            // //向上补偿摩擦力并加额外力矩
+            // if(pitch_small_state.diff < 0)
+            // {
+            //     A = -3002.8;
+            //     C = -949.5;
                 
-            }
-            //向下补偿
-            else
-            {
-                A = -1837.5;
-                C = 97.0;
+            // }
+            // //向下补偿
+            // else
+            // {
+            //     A = -1837.5;
+            //     C = 97.0;
 
-            }
-            float external_force = JointPIDCal(pitch_small_pid,pitch_small_state.diff,pitch_motor_small->measure.speed_aps);
+            // }
+            A = -2420.15;
+            C = -426.26;
+            float external_force = JointPIDCal(pitch_small_pid,-pitch_small_state.diff,pitch_motor_small->measure.speed_aps);
+            //运动过程中不触发反馈
+            if (pitch_small_state.diff < 0 && pitch_motor_small->measure.speed_aps < -200)
+                external_force = 0;
+            if (pitch_small_state.diff > 0 && pitch_motor_small->measure.speed_aps > 200)
+                external_force = 0;
             raw_comp_small = (A * cosf((pitch_angle_small - pitch_angle_big) * DEG_TO_RAD)) + C + external_force;
             break;
         }
@@ -389,19 +404,26 @@ static void KeepBalance()
         }
         case JOINT_FORCE_FEEDBACK:
         {
-            if(pitch_big_state.diff > 0)
-            {
-                A = 1753.2;
-                B = 2997.3;
-                C = 1264.9;
-            }
-            else
-            {
-                A = 3334.0;
-                B = 3861.1;
-                C = -434.1;
-            }
-            float external_force = JointPIDCal(pitch_big_pid,pitch_big_state.diff,pitch_motor_big->measure.speed_aps);
+            // if(pitch_big_state.diff > 0)
+            // {
+            //     A = 1753.2;
+            //     B = 2997.3;
+            //     C = 1264.9;
+            // }
+            // else
+            // {
+            //     A = 3334.0;
+            //     B = 3861.1;
+            //     C = -434.1;
+            // }
+            A = 2543.6;
+            B = 3429.2;
+            C = 415.4;
+            float external_force = JointPIDCal(pitch_big_pid,-pitch_big_state.diff,pitch_motor_big->measure.speed_aps);
+            if (pitch_big_state.diff < 0 && pitch_motor_big->measure.speed_aps < -200)
+                external_force = 0;
+            if (pitch_big_state.diff > 0 && pitch_motor_big->measure.speed_aps > 200)
+                external_force = 0;
             raw_comp_big = (A * cosf(pitch_angle_big * DEG_TO_RAD)) + 
                             (B * cosf((180.0f - pitch_angle_small + pitch_angle_big) * DEG_TO_RAD)) + 
                             C + external_force;
@@ -445,7 +467,7 @@ static void ForceFeedBack()
     pitch_small_state.diff = controller_cmd.pitch_small_angle - arm_feedback.pitch_small_angle;
     pitch_big_state.diff = arm_feedback.pitch_big_angle - controller_cmd.pitch_big_angle;
 
-    if(fabs(pitch_big_state.diff) >= ANGLE_DEADZONE)
+    if(fabs(pitch_big_state.diff) >= ANGLE_DEADZONE &&arm_feedback.feedback_flag_pitch_big == 1)
     {
         pitch_big_state.state = JOINT_FORCE_FEEDBACK;
     }
@@ -453,7 +475,7 @@ static void ForceFeedBack()
     {
         pitch_big_state.state = JOINT_BALANCE;
     }
-    if(fabs(pitch_small_state.diff) >= ANGLE_DEADZONE)
+    if(fabs(pitch_small_state.diff) >= ANGLE_DEADZONE && arm_feedback.feedback_flag_pitch_small == 1)
     {
         pitch_small_state.state = JOINT_FORCE_FEEDBACK;
     }
