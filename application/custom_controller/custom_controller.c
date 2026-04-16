@@ -20,7 +20,7 @@
 #define BUFFER_LENGTH (8)
 
 static DJIMotorInstance *yaw_motor,*pitch_motor_big,*pitch_motor_small,*roll_motor_big,*differencial_motor_pitch;
-static Joint_state_s pitch_big_state,pitch_small_state;
+static Joint_state_s yaw_state,pitch_big_state,pitch_small_state,roll_state,diff_pitch_state;
 static float yaw_angle,pitch_angle_big,pitch_angle_small,roll_angle,end_pitch_angle;
 static float yaw_ecd_offset,pitch_big_ecd_offset,pitch_small_ecd_offset,roll_ecd_offset,end_pitch_ecd_offset;
 static Button_judge_s button_1,button_2,button_3,button_4;
@@ -34,8 +34,12 @@ static CANCommInstance* controller_can_comm;
 static controller_state_e controller_state;//是否复位，启动力反馈和重力补偿
 static TickType_t last_rx_time;
 static TickType_t interval = 100;
+static Joint_pid_s* yaw_pid;
 static Joint_pid_s* pitch_small_pid;
 static Joint_pid_s* pitch_big_pid;
+static Joint_pid_s* roll_pid;
+static Joint_pid_s* diff_pitch_pid;
+
 
 void CustomControllerInit()
 {
@@ -99,7 +103,24 @@ void CustomControllerInit()
     roll_motor_big = DJIMotorInit(&_2006_config);
     _2006_config.can_init_config.tx_id = 4;
     differencial_motor_pitch = DJIMotorInit(&_2006_config);
+    PID_Init_Config_s yaw_inner_pid_cfg = {
+        .Kp = 0,
+        .Ki = 0,
+        .Kd = 0,
 
+        .Improve = PID_Integral_Limit,
+        .IntegralLimit = 3000,
+        .MaxOut = 9000,
+    };
+    PID_Init_Config_s yaw_outer_pid_cfg = {
+        .Kp = 0,
+        .Ki = 0,
+        .Kd = 0,
+
+        .Improve = PID_Integral_Limit,
+        .IntegralLimit = 3000,
+        .MaxOut = 9000,
+    };
     PID_Init_Config_s small_inner_pid_cfg = {
         .Kp = 8,
         .Ki = 10,
@@ -132,10 +153,52 @@ void CustomControllerInit()
 
         .MaxOut = 4500,
     };
+    PID_Init_Config_s roll_inner_pid_cfg = {
+        .Kp = 0,
+        .Ki = 0,
+        .Kd = 0,
+
+        .Improve = PID_Integral_Limit,
+        .IntegralLimit = 3000,
+        .MaxOut = 9000,
+    };
+    PID_Init_Config_s roll_outer_pid_cfg = {
+        .Kp = 0,
+        .Ki = 0,
+        .Kd = 0,
+
+        .Improve = PID_Integral_Limit,
+        .IntegralLimit = 3000,
+        .MaxOut = 9000,
+    };
+    PID_Init_Config_s diff_pitch_inner_pid_cfg = {
+        .Kp = 0,
+        .Ki = 0,
+        .Kd = 0,
+
+        .Improve = PID_Integral_Limit,
+        .IntegralLimit = 3000,
+        .MaxOut = 9000,
+    };
+    PID_Init_Config_s diff_pitch_outer_pid_cfg = {
+        .Kp = 0,
+        .Ki = 0,
+        .Kd = 0,
+
+        .Improve = PID_Integral_Limit,
+        .IntegralLimit = 3000,
+        .MaxOut = 9000,
+    };
+    PIDInit(&yaw_pid->inner_loop,&yaw_inner_pid_cfg);
+    PIDInit(&yaw_pid->outer_loop,&yaw_outer_pid_cfg);
     PIDInit(&pitch_small_pid->inner_loop,&small_inner_pid_cfg);
     PIDInit(&pitch_small_pid->outer_loop,&small_outer_pid_cfg);
     PIDInit(&pitch_big_pid->inner_loop,&big_inner_pid_cfg);
     PIDInit(&pitch_big_pid->outer_loop,&big_outer_pid_cfg);
+    PIDInit(&roll_pid->inner_loop,&roll_inner_pid_cfg);
+    PIDInit(&roll_pid->outer_loop,&roll_outer_pid_cfg);
+    PIDInit(&diff_pitch_pid->inner_loop,&diff_pitch_inner_pid_cfg);
+    PIDInit(&diff_pitch_pid->outer_loop,&diff_pitch_outer_pid_cfg);
     CANComm_Init_Config_s controller_can_cfg = 
     {
         .can_config = {
@@ -331,13 +394,17 @@ static void KeepBalance()
     static float filter_alpha = 0.2f; // 滤波系数，越小越平滑
     
     //存储滤波状态的静态变量
+    static float last_comp_yaw = 0;
     static float last_comp_small = 0;
     static float last_comp_big = 0;
-
+    static float last_comp_roll = 0;
+    static float last_comp_diff_pitch = 0;
     //原始输出
+    static float raw_comp_yaw;
     static float raw_comp_small;
     static float raw_comp_big;
-
+    static float raw_comp_roll;
+    static float raw_comp_diff_pitch;
     //角度差-电流映射参数
     static float Kp_small = 30.0f;
     static float Kp_big = 30.0f;
@@ -436,6 +503,69 @@ static void KeepBalance()
     last_comp_big = filtered_big;
     float damping_big = pitch_motor_big->measure.speed_aps * kv_big;
     DJIMotorSetRef(pitch_motor_big, filtered_big - damping_big);
+
+    switch(yaw_state.state)
+    {
+        case JOINT_BALANCE:
+        {
+            raw_comp_yaw = 0;
+            break;
+        }
+        case JOINT_FORCE_FEEDBACK:
+        {
+            raw_comp_yaw = JointPIDCal(yaw_pid,yaw_state.diff,yaw_motor->measure.speed_aps);
+            if(yaw_state.diff < 0 && yaw_motor->measure.speed_aps < -10)
+                raw_comp_yaw = 0;
+            if(yaw_state.diff > 0 && yaw_motor->measure.speed_aps > 10)
+                raw_comp_yaw = 0;
+            break;
+        }
+    }
+    float filtered_yaw = filter_alpha * raw_comp_yaw + (1.0f - filter_alpha) * last_comp_yaw;
+    last_comp_yaw = filtered_yaw;
+    DJIMotorSetRef(yaw_motor,filtered_yaw);
+
+    switch(roll_state.state)
+    {
+        case JOINT_BALANCE:
+        {
+            raw_comp_roll = 0;
+            break;
+        }
+        case JOINT_FORCE_FEEDBACK:
+        {
+            raw_comp_roll = JointPIDCal(roll_pid,roll_state.diff,roll_motor_big->measure.speed_aps);
+            if(roll_state.diff < 0 && roll_motor_big-> measure.speed_aps < -10)
+                raw_comp_roll = 0;
+            if(roll_state.diff > 0 && roll_motor_big-> measure.speed_aps > 10)
+                raw_comp_roll = 0;
+            break;
+        }
+    }
+    float filtered_roll = filter_alpha * raw_comp_roll + (1.0f - filter_alpha) * last_comp_roll;
+    last_comp_roll = filtered_roll;
+    DJIMotorSetRef(roll_motor_big,filtered_roll);
+
+    switch(diff_pitch_state.state)
+    {
+        case JOINT_BALANCE:
+        {
+            raw_comp_diff_pitch = 0;
+            break;
+        }
+        case JOINT_FORCE_FEEDBACK:
+        {
+            raw_comp_diff_pitch = JointPIDCal(diff_pitch_pid,diff_pitch_state.diff,differencial_motor_pitch->measure.speed_aps);
+            if(diff_pitch_state.diff < 0 && differencial_motor_pitch-> measure.speed_aps < -10)
+                raw_comp_diff_pitch = 0;
+            if(diff_pitch_state.diff > 0 && differencial_motor_pitch-> measure.speed_aps > 10)
+                raw_comp_diff_pitch = 0;
+            break;
+        }
+    }
+    float filtered_diff_pitch = filter_alpha * raw_comp_diff_pitch + (1.0f - filter_alpha) * last_comp_diff_pitch;
+    last_comp_diff_pitch = filtered_diff_pitch;
+    DJIMotorSetRef(differencial_motor_pitch,filtered_diff_pitch);
 }
 
 static void GetFeedBackInfo()
@@ -464,10 +594,20 @@ static void GetFeedBackInfo()
 static void ForceFeedBack()
 {
     /*角度差以与电流补偿方向一致为正*/
+    yaw_state.diff = controller_cmd.yaw_angle - arm_feedback.yaw_angle;//符号可能需要反一下，未验证
     pitch_small_state.diff = controller_cmd.pitch_small_angle - arm_feedback.pitch_small_angle;
     pitch_big_state.diff = arm_feedback.pitch_big_angle - controller_cmd.pitch_big_angle;
-
-    if(fabs(pitch_big_state.diff) >= ANGLE_DEADZONE &&arm_feedback.feedback_flag_pitch_big == 1)
+    roll_state.diff = controller_cmd.roll_angle - arm_feedback.roll_angle;
+    diff_pitch_state.diff = controller_cmd.diff_pitch - arm_feedback.diff_pitch;
+    if(fabs(yaw_state.diff) >= ANGLE_DEADZONE && arm_feedback.feedback_flag_yaw == 1)
+    {
+        yaw_state.state = JOINT_FORCE_FEEDBACK;
+    }
+    else
+    {
+        yaw_state.state = JOINT_BALANCE;
+    }
+    if(fabs(pitch_big_state.diff) >= ANGLE_DEADZONE && arm_feedback.feedback_flag_pitch_big == 1)
     {
         pitch_big_state.state = JOINT_FORCE_FEEDBACK;
     }
@@ -483,6 +623,22 @@ static void ForceFeedBack()
     {
         pitch_small_state.state = JOINT_BALANCE;
     }
+    if(fabs(roll_state.diff) >= ANGLE_DEADZONE && arm_feedback.feedback_flag_roll == 1)
+    {
+        roll_state.state = JOINT_FORCE_FEEDBACK;
+    }
+    else
+    {
+        roll_state.state = JOINT_BALANCE;
+    }
+    if(fabs(diff_pitch_state.diff) >= ANGLE_DEADZONE && arm_feedback.feedback_flag_diff_pitch == 1)
+    {
+        roll_state.state = JOINT_FORCE_FEEDBACK;
+    }
+    else
+    {
+        roll_state.state = JOINT_BALANCE;
+    }    
     //LinearInterpolation();
 }
 

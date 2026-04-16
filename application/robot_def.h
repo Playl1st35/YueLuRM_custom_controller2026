@@ -291,7 +291,8 @@ typedef struct
     uint8_t feedback_flag_pitch_small;
     uint8_t feedback_flag_yaw;
     uint8_t feedback_flag_roll;
-    uint8_t reserved[5];
+    uint8_t feedback_flag_diff_pitch;
+    uint8_t reserved[4];
 }Arm_feed_s;
 
 typedef struct 
